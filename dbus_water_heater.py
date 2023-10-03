@@ -17,6 +17,9 @@ from datetime import datetime
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python",),)
 from vedbus import VeDbusService
 
+class UnknownDeviceException(Exception):
+  '''class to indicate that no device was found'''
+
 Version = 1.0
 
 path_UpdateIndex = '/UpdateIndex'
@@ -33,6 +36,7 @@ class WaterHeater:
       "Temperature": 0,
       "Heartbeat_Return" : 1,
       "Power_Return": 2,
+      "Device_Type": 3,
       "Heartbeat": 0
     }
 
@@ -44,6 +48,13 @@ class WaterHeater:
     self.current_temperature = None
     self.heartbeat = 0
 
+    if not self.check_device_type():
+      raise UnknownDeviceException
+
+
+  def check_device_type(self):
+    return self.instrument.read_register(self.registers["Device_Type"], 0, 4) == 0x3286
+    
 
   def calc_powercmd(self, grid_surplus):
     res = None
@@ -61,7 +72,7 @@ class WaterHeater:
 
 
       # but stop heating if target temperature is reached
-      self.current_temperature = self.instrument.read_register(self.registers["Temperature"], 0, 4)
+      self.current_temperature = self.instrument.read_register(self.registers["Temperature"], 2, 4)
       if self.current_temperature >= self.target_temperature:
         cmd_bits = [0, 0, 0]
 
@@ -74,10 +85,8 @@ class WaterHeater:
         self.heartbeat = 0
 
 
-    
-
-class DbusSolisS5Service:
-  def __init__(self, port, servicename, deviceinstance=288, productname='Solis S5 PV Inverter', connection='unknown'):
+class DbusWaterHeaterService:
+  def __init__(self, port, servicename, deviceinstance=88, productname='DIY Solar Water Heater', connection='unknown'):
     try:
       self._dbusservice = VeDbusService(servicename)
 

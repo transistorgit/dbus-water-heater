@@ -83,9 +83,13 @@ Check if grid surplus is for 1 minute bigger than 500, 1000, ... 3500W and comma
 Switch down if the power level is below the step for more than 1 min.
 Never switch more often than once per minute (other restrictions from grid operators my apply, you have to adjust the timing to your local regulations)
 
-Todo:
-Add setting for domestic/heater modes (or just set target temperature)
-Add menu: Off/Auto low/Auto high/On (Test)
-Show current water temperature
-Show kWh since last 24h, week
+__Todo:__  
+Add setting for target temperature
+Add menu: Off/Auto low/Auto high/On (Test)  
+Show current water temperature  
+Show kWh since last 24h, week  
 Show switch counter, hours in each power level for last 24h
+
+### Run Unittest
+
+`python -m  unittest test.py`
