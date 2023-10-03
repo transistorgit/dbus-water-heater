@@ -21,6 +21,7 @@ class UnknownDeviceException(Exception):
   '''class to indicate that no device was found'''
 
 Version = 1.0
+Server_Address = 33  # Modbus ID of the Water Heater Device
 
 path_UpdateIndex = '/UpdateIndex'
 
@@ -46,14 +47,14 @@ class WaterHeater:
     self.lasttime_switched = datetime.now()
     self.target_temperature = 50  #°C
     self.current_temperature = None
+    self.current_power = None
     self.heartbeat = 0
-
-    if not self.check_device_type():
-      raise UnknownDeviceException
+    self.Device_Type = 0x3286
 
 
   def check_device_type(self):
-    return self.instrument.read_register(self.registers["Device_Type"], 0, 4) == 0x3286
+    if self.instrument.read_register(self.registers["Device_Type"], 0, 4) != self.Device_Type:
+            raise UnknownDeviceException
     
 
   def calc_powercmd(self, grid_surplus):
@@ -79,6 +80,8 @@ class WaterHeater:
       self.instrument.write_bits(self.registers["Power_500W"], cmd_bits)
       self.lasttime_switched = datetime.now()
         
+    self.current_power = self.instrument.read_register(self.registers["Power_Return"], 0, 4)
+
     self.instrument.write_register(self.registers["Heartbeat"], self.heartbeat)
     self.heartbeat += 1
     if self.heartbeat >= 100:
@@ -86,24 +89,21 @@ class WaterHeater:
 
 
 class DbusWaterHeaterService:
-  def __init__(self, port, servicename, deviceinstance=88, productname='DIY Solar Water Heater', connection='unknown'):
+  def __init__(self, port, servicename, deviceinstance=88, productname='DIY Solar Water Heater (Modbus RTU)', connection='unknown'):
     try:
       self._dbusservice = VeDbusService(servicename)
 
       logging.debug("%s /DeviceInstance = %d" % (servicename, deviceinstance))
       
       try:
-        instrument = minimalmodbus.Instrument( port, 33)
-      except minimalmodbus.NoResponseError as e:
-        logging.error(f"Water Heater: No Response Error: {e}")
-        print(e)  # debug
-        raise RuntimeError
+        instrument = minimalmodbus.Instrument(port, Server_Address)
       except Exception as e:
-        logging.error(f"Water Heater: Unknown Error: {e}")
+        logging.error(f"Water Heater: {e}")
         print(e)  # debug
-        raise RuntimeError
+        raise e
 
-      self.inverter = WaterHeater(instrument)
+      self.boiler = WaterHeater(instrument)
+      self.boiler.check_device_type()
 
       # Create the management objects, as specified in the ccgx dbus-api document
       self._dbusservice.add_path('/Mgmt/ProcessName', __file__)
@@ -112,73 +112,38 @@ class DbusWaterHeaterService:
 
       # Create the mandatory objects
       self._dbusservice.add_path('/DeviceInstance', deviceinstance)
-      self._dbusservice.add_path('/ProductId', 1234) # pv inverter?
+      self._dbusservice.add_path('/ProductId', self.boiler.Device_Type) 
       self._dbusservice.add_path('/ProductName', productname)
-      self._dbusservice.add_path('/FirmwareVersion', f'DSP:{self.inverter.read_dsp_version()}_LCD:{self.inverter.read_lcd_version()}')
-      self._dbusservice.add_path('/HardwareVersion', self.inverter.read_type())
+      self._dbusservice.add_path('/FirmwareVersion', Version)
+      self._dbusservice.add_path('/HardwareVersion', 0)
       self._dbusservice.add_path('/Connected', 1)
 
-      self._dbusservice.add_path('/Ac/Power', None, writeable=True, gettextcallback=lambda a, x: "{:.0f}W".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/Current', None, writeable=True, gettextcallback=lambda a, x: "{:.1f}A".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/MaxPower', None, writeable=True, gettextcallback=lambda a, x: "{:.0f}W".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/Energy/Forward', None, writeable=True, gettextcallback=lambda a, x: "{:.0f}kWh".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/L1/Voltage', None, writeable=True, gettextcallback=lambda a, x: "{:.1f}V".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/L2/Voltage', None, writeable=True, gettextcallback=lambda a, x: "{:.1f}V".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/L3/Voltage', None, writeable=True, gettextcallback=lambda a, x: "{:.1f}V".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/L1/Current', None, writeable=True, gettextcallback=lambda a, x: "{:.1f}A".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/L2/Current', None, writeable=True, gettextcallback=lambda a, x: "{:.1f}A".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/L3/Current', None, writeable=True, gettextcallback=lambda a, x: "{:.1f}A".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/L1/Power', None, writeable=True, gettextcallback=lambda a, x: "{:.0f}W".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/L2/Power', None, writeable=True, gettextcallback=lambda a, x: "{:.0f}W".format(x), onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Ac/L3/Power', None, writeable=True, gettextcallback=lambda a, x: "{:.0f}W".format(x), onchangecallback=self._handlechangedvalue)
+      self._dbusservice.add_path('/Heater/TargetTemperature', None, writeable=True, gettextcallback=lambda a, x: "{:.0f}°C".format(x), onchangecallback=self._handlechangedvalue)
       self._dbusservice.add_path('/ErrorCode', 0, writeable=True, onchangecallback=self._handlechangedvalue)
       self._dbusservice.add_path('/StatusCode', 0, writeable=True, onchangecallback=self._handlechangedvalue)
-      self._dbusservice.add_path('/Position', 0, writeable=True, onchangecallback=self._handlechangedvalue)
       self._dbusservice.add_path(path_UpdateIndex, 0, writeable=True, onchangecallback=self._handlechangedvalue)
 
-      gobject.timeout_add(300, self._update) # pause 300ms before the next request
+      gobject.timeout_add(1000, self._update) # pause 300ms before the next request
     except UnknownDeviceException:
-      logging.warning('No Solis Inverter detected, exiting')
+      logging.warning('No Water Heater detected, exiting')
       sys.exit(1)
     except Exception as e:
-      logging.critical("Fatal error at %s", 'DbusSolisS5Service.__init', exc_info=e)
+      logging.critical("Fatal error at %s", 'DbusWaterHeaterService.__init', exc_info=e)
       sys.exit(2)
 
   def _update(self):
     try:
 
-      self.inverter.read_registers()
+      self.boiler.read_registers()
 
-      self._dbusservice['/Ac/Power']          = self.inverter.registers["Active Power"][4]
-      self._dbusservice['/Ac/Current']        = self.inverter.registers["A phase Current"][4]+self.inverter.registers["B phase Current"][4]+self.inverter.registers["C phase Current"][4]
-      self._dbusservice['/Ac/MaxPower']       = 6000
-      self._dbusservice['/Ac/Energy/Forward'] = self.inverter.registers["Energy Total"][4]
-      self._dbusservice['/Ac/L1/Voltage']     = self.inverter.registers["A phase Voltage"][4]
-      self._dbusservice['/Ac/L2/Voltage']     = self.inverter.registers["B phase Voltage"][4]
-      self._dbusservice['/Ac/L3/Voltage']     = self.inverter.registers["C phase Voltage"][4]
-      self._dbusservice['/Ac/L1/Current']     = self.inverter.registers["A phase Current"][4]
-      self._dbusservice['/Ac/L2/Current']     = self.inverter.registers["B phase Current"][4]
-      self._dbusservice['/Ac/L3/Current']     = self.inverter.registers["C phase Current"][4]
-      self._dbusservice['/Ac/L1/Power']       = self.inverter.registers["A phase Current"][4]*self.inverter.registers["A phase Voltage"][4]
-      self._dbusservice['/Ac/L2/Power']       = self.inverter.registers["B phase Current"][4]*self.inverter.registers["B phase Voltage"][4]
-      self._dbusservice['/Ac/L3/Power']       = self.inverter.registers["C phase Current"][4]*self.inverter.registers["C phase Voltage"][4]
+      self._dbusservice['/Heater/Power']      = self.boiler.current_power
+      self._dbusservice['/Heater/Temperature']= self.boiler.current_temperature
       self._dbusservice['/ErrorCode']         = 0 # TODO
-      self._dbusservice['/StatusCode']        = self.inverter.read_status()
+      self._dbusservice['/StatusCode']        = self.boiler.read_status()
     except Exception as e:
-      logging.info("WARNING: Could not read from Solis S5 Inverter", exc_info=sys.exc_info()[0])
-      self._dbusservice['/Ac/Power']          = None
-      self._dbusservice['/Ac/Current']        = None
-      self._dbusservice['/Ac/MaxPower']       = None
-      self._dbusservice['/Ac/Energy/Forward'] = None
-      self._dbusservice['/Ac/L1/Voltage']     = None
-      self._dbusservice['/Ac/L2/Voltage']     = None
-      self._dbusservice['/Ac/L3/Voltage']     = None
-      self._dbusservice['/Ac/L1/Current']     = None
-      self._dbusservice['/Ac/L2/Current']     = None
-      self._dbusservice['/Ac/L3/Current']     = None
-      self._dbusservice['/Ac/L1/Power']       = None
-      self._dbusservice['/Ac/L2/Power']       = None
-      self._dbusservice['/Ac/L3/Power']       = None
+      logging.info("WARNING: Could not read from Water Heater", exc_info=sys.exc_info()[0])
+      self._dbusservice['/Heater/Power']          = None
+      self._dbusservice['/Heater/Temperature']    = None
       self._dbusservice['/ErrorCode']         = None
       self._dbusservice['/StatusCode']        = None
 
@@ -202,7 +167,7 @@ def main():
                       ])
 
   try:
-    logging.info("Start Solis S5 Inverter modbus service v" + str(Version))
+    logging.info("Start Water Heater modbus service v" + str(Version))
 
     if len(sys.argv) > 1:
         port = sys.argv[1]
@@ -216,10 +181,10 @@ def main():
 
     portname = port.split('/')[-1]
     portnumber = int(portname[-1]) if portname[-1].isdigit() else 0
-    pvac_output = DbusSolisS5Service(
+    pvac_output = DbusWaterHeaterService(
       port = port,
-      servicename = 'com.victronenergy.pvinverter.' + portname,
-      deviceinstance = 288 + portnumber,
+      servicename = 'com.victronenergy.boiler.' + portname,
+      deviceinstance = 88 + portnumber,
       connection = 'Modbus RTU on ' + port)
 
     logging.info('Connected to dbus, and switching over to gobject.MainLoop() (= event based)')

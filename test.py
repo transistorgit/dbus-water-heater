@@ -15,7 +15,8 @@ class ModbusDummy():
 class Test(unittest.TestCase):
 
   def test_powercmd(self):
-    dut = WaterHeater(ModbusDummy)
+    mymodbus = ModbusDummy()
+    dut = WaterHeater(mymodbus)
 
     self.assertEqual(dut.calc_powercmd(-1000),[0, 0, 0])
     self.assertEqual(dut.calc_powercmd(100),  [0, 0, 0])
