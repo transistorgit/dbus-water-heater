@@ -1,7 +1,7 @@
 #!/bin/bash
 set -x
 
-DRIVERNAME=dbus-water-heater
+DRIVERNAME=dbus_water_heater
 
 rm -rf /opt/victronenergy/service/$DRIVERNAME
 rm -rf /opt/victronenergy/service-templates/$DRIVERNAME

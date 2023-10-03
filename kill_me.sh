@@ -1,3 +1,3 @@
 #!/bin/bash
-kill $(pgrep -f 'python /opt/victronenergy/dbus-water-heater/dbus-water-heater.py')
+kill $(pgrep -f 'python /opt/victronenergy/dbus_water_heater/dbus_water_heater.py')
 

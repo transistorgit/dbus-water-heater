@@ -1,7 +1,7 @@
 #!/bin/bash
 set -x
 
-DRIVERNAME=dbus-water-heater
+DRIVERNAME=dbus_water_heater
 
 #install
 rm -rf /opt/victronenergy/service/$DRIVERNAME

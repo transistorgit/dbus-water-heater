@@ -10,127 +10,71 @@ import os
 import _thread as thread
 import minimalmodbus
 from time import sleep
+from datetime import datetime
 
 # our own packages
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python",),)
 from vedbus import VeDbusService
 
-Version = 1.4
+Version = 1.0
 
 path_UpdateIndex = '/UpdateIndex'
 
-class UnknownDeviceException(Exception):
-  '''Exception to report that no Solis S5 Type inverter was found'''
-
-class s5_inverter:
-  def __init__(self, port='/dev/ttyUSB0', address=1):
+class WaterHeater:
+  def __init__(self, instrument: minimalmodbus.Instrument):
     self._dbusservice = []
-    self.bus = minimalmodbus.Instrument(port, address)
-    self.bus.serial.baudrate = 9600
-    self.bus.serial.timeout = 0.1
-
-    #use serial number production code to detect solis inverters
-    ser = self.read_serial()
-    if not self.check_production_date(ser):
-      raise UnknownDeviceException
+    self.instrument = instrument
 
     self.registers = {
-      # name        : nr , format, factor, unit
-      "Active Power": [3004, 'U32', 1, 'W', 0],
-      "Energy Today": [3015, 'U16', 1, 'kWh', 0],
-      "Energy Total": [3008, 'U32', 1, 'kWh', 0],
-      "A phase Voltage": [3033, 'U16', 1, 'V', 0],
-      "B phase Voltage": [3034, 'U16', 1, 'V', 0],
-      "C phase Voltage": [3035, 'U16', 1, 'V', 0],
-      "A phase Current": [3036, 'U16', 1, 'A', 0],
-      "B phase Current": [3037, 'U16', 1, 'A', 0],
-      "C phase Current": [3038, 'U16', 1, 'A', 0],
+      "Power_500W": 0,
+      "Power_1000W": 1,
+      "Power_2000W": 2,
+      "Temperature": 0,
+      "Heartbeat_Return" : 1,
+      "Power_Return": 2,
+      "Heartbeat": 0
     }
 
-
-  def read_registers(self):
-    for key, value in self.registers.items():
-        factor = value[2]
-        for _ in range(3):
-          try:
-            if value[1] == 'U32':
-              value[4]= self.bus.read_long(value[0],4) * factor
-            else:
-              value[4] = self.bus.read_register(value[0],1,4) * factor
-            break
-          except minimalmodbus.ModbusException:
-            value[4]= 0
-            pass # igonore sporadic checksum or noreply errors but raise others
-
-        # print(f"{key}: {value[-1]} {value[-2]}")
-    return self.registers
+    self.powersteps =    [(-1000000, 499), (500, 999), (1000, 1499), (1500, 1999), (2000, 2499), (2500, 2999), (3000, 3499), (3500, 1000000)]
+    self.powercommands = [[0, 0, 0],       [1, 0, 0],  [0, 1, 0],    [1, 1, 0],    [0, 0, 1],    [1, 0, 1],    [0, 1, 1],    [1, 1, 1]]
+    self.minimum_time = 60  # minimum time between switch actions in s
+    self.lasttime_switched = datetime.now()
+    self.target_temperature = 50  #°C
+    self.current_temperature = None
+    self.heartbeat = 0
 
 
-  def read_status(self):
-    for _ in range(3):
-      try:
-        status = int(self.bus.read_register(3043, 0, 4))
-        return status
-      except minimalmodbus.ModbusException:
-        pass # igonore sporadic checksum or noreply errors but raise others
-    
-    # print(f'Inverter Status: {status:04X}') # 0 waiting, 3 generating
-    return 0
+  def calc_powercmd(self, grid_surplus):
+    res = None
+    for idx in (idx for idx, (sec, fir) in enumerate(self.powersteps) if sec <= grid_surplus <= fir):
+      res = idx
+    return self.powercommands[res]
+  
+
+  def operate(self, grid_surplus):
+    # needs to be called regularly (e.g. 1/s) to update the heartbeat
+
+    # switch to apropriate power level, if last switching incident is longer than the allowed minimum time ago
+    if (datetime.now() - self.lasttime_switched).total_seconds() >= self.minimum_time:
+      cmd_bits = self.calc_powercmd(grid_surplus)  # calculate power setting depending on energy surplus
 
 
-  def _to_little_endian(self, b):
-    return (b&0xf)<<12 | (b&0xf0)<<4 | (b&0xf00)>>4 | (b&0xf000)>>12
+      # but stop heating if target temperature is reached
+      self.current_temperature = self.instrument.read_register(self.registers["Temperature"], 0, 4)
+      if self.current_temperature >= self.target_temperature:
+        cmd_bits = [0, 0, 0]
 
+      self.instrument.write_bits(self.registers["Power_500W"], cmd_bits)
+      self.lasttime_switched = datetime.now()
+        
+    self.instrument.write_register(self.registers["Heartbeat"], self.heartbeat)
+    self.heartbeat += 1
+    if self.heartbeat >= 100:
+        self.heartbeat = 0
 
-  def read_serial(self):
-    for _ in range(6):
-      try:
-        serial = {}
-        serial["Inverter SN_1"] = self._to_little_endian(int(self.bus.read_register(3060, 0, 4)))
-        serial["Inverter SN_2"] = self._to_little_endian(int(self.bus.read_register(3061, 0, 4)))
-        serial["Inverter SN_3"] = self._to_little_endian(int(self.bus.read_register(3062, 0, 4)))
-        serial["Inverter SN_4"] = self._to_little_endian(int(self.bus.read_register(3063, 0, 4)))
-        serial_str = f'{serial["Inverter SN_1"]:04X}{serial["Inverter SN_2"]:04X}{serial["Inverter SN_3"]:04X}{serial["Inverter SN_4"]:04X}'
-        return serial_str
-      except minimalmodbus.ModbusException:
-        sleep(1)
-        pass
-    return ''
-
-
-  def read_type(self):
-    try:
-      return f'{self._to_little_endian(int(self.bus.read_register(2999, 0, 4))):04X}'
-    except minimalmodbus.ModbusException:
-      return ''
 
     
-  def read_dsp_version(self):
-    try:
-      return f'{self._to_little_endian(int(self.bus.read_register(3000, 0, 4))):04X}'
-    except minimalmodbus.ModbusException:
-      return ''
-    
-
-  def read_lcd_version(self):
-    try:
-      return f'{self._to_little_endian(int(self.bus.read_register(3001, 0, 4))):04X}'
-    except minimalmodbus.ModbusException:
-      return ''
-
-
-  def check_production_date(self, serial):
-    try:
-      year = int(serial[7:9])
-      month = int(serial[9:10],16)
-      day = int(serial[10:12])
-      #print(f'{year}/{month}/{day}')
-      if year>20 and year<30 and month<=12 and day<=31:
-        return True
-    except:
-      return False
-
 
 class DbusSolisS5Service:
   def __init__(self, port, servicename, deviceinstance=288, productname='Solis S5 PV Inverter', connection='unknown'):
@@ -138,7 +82,19 @@ class DbusSolisS5Service:
       self._dbusservice = VeDbusService(servicename)
 
       logging.debug("%s /DeviceInstance = %d" % (servicename, deviceinstance))
-      self.inverter = s5_inverter(port)
+      
+      try:
+        instrument = minimalmodbus.Instrument( port, 33)
+      except minimalmodbus.NoResponseError as e:
+        logging.error(f"Water Heater: No Response Error: {e}")
+        print(e)  # debug
+        raise RuntimeError
+      except Exception as e:
+        logging.error(f"Water Heater: Unknown Error: {e}")
+        print(e)  # debug
+        raise RuntimeError
+
+      self.inverter = WaterHeater(instrument)
 
       # Create the management objects, as specified in the ccgx dbus-api document
       self._dbusservice.add_path('/Mgmt/ProcessName', __file__)
