@@ -12,11 +12,11 @@ import _thread as thread
 import minimalmodbus
 from time import sleep
 from datetime import datetime as dt
-from dbusmon import DbusMon
 from threading import Thread
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python",),)
-from vedbus import VeDbusService
+from vedbus import VeDbusService, VeDbusItemImport
+from dbusmonitor import DbusMonitor
 
 class UnknownDeviceException(Exception):
   '''class to indicate that no device was found'''
@@ -131,10 +131,18 @@ class DbusWaterHeaterService:
       self._dbusservice.add_path('/StatusCode', 0, writeable=True, onchangecallback=self._handlechangedvalue)
       self._dbusservice.add_path(path_UpdateIndex, 0, writeable=True, onchangecallback=self._handlechangedvalue)
 
-      x = Thread(target = self._startMonitor)
-      x.start()   
+      logging.info('%s: Searching Gridmeter on VEBus' % ((dt.now()).strftime('%c'),))
+      #self._dbusReadObjects = {}
+      #self._dbusReadObjects['GridPower'] = VeDbusItemImport(self._dbusConn, 'com.victronenergy.grid.sml_40', '/Ac/Power')
 
-      gobject.timeout_add(5000, self._find_gridmeter)
+      dummy = {'code': None, 'whenToLog': 'configChange', 'accessLevel': None}
+      self.monitor = DbusMonitor(
+          {
+              'com.victronenergy.grid': {'/Ac/Power': dummy}
+          }
+      )
+
+      gobject.timeout_add(1000, self._update)
     except UnknownDeviceException:
       logging.warning('No Water Heater detected, exiting')
       sys.exit(1)
@@ -142,56 +150,31 @@ class DbusWaterHeaterService:
       logging.critical("Fatal error at %s", 'DbusWaterHeaterService.__init', exc_info=e)
       sys.exit(2)
 
-  def _startMonitor(self):
-      logging.info('%s: Starting battery monitor.' % (dt.now()).strftime('%c'))
-      self._dbusMon = DbusMon()
-      print(f"in start {self._dbusMon}")
-
-  def _find_gridmeter(self):
-      logging.info('%s: Searching Gridmeter on VEBus: Trial Nr. %d' % ((dt.now()).strftime('%c'),(self.search_trials + 1)))
-      #try:
-      for service in self._dbusConn.list_names():
-          print(service)
-          if GRIDMETER_KEY_WORD in service:
-            self.gridmeter = service
-            print(f"in find: {self._dbusMon}")
-            logging.info('%s: %s found.' % ((dt.now()).strftime('%c'),(self._dbusMon.dbusmon.get_value(service, '/ProductName'))))
-      #except Exception:
-      #    pass
-          
-      if (self.gridmeter != None):        
-          gobject.timeout_add(1000, self._update)
-          logging.info("****Starting Update Loop")
-          return False  # all OK, stop calling this function
-      elif self.search_trials < SEARCH_TRIALS:
-          self.search_trials += 1
-          return True                                                 # next trial
-      else:
-          logging.error('%s: Gridmeter not found. Exiting.' % (dt.now()).strftime('%c'))
-          sys.exit()    
-
 
   def _update(self):
 
-    if self.gridmeter:
-      try:
-        power_surplus = self._dbusMon.dbusmon.get_value(self.gridmeter, '/Ac/Power')
+    try:
+      serviceNames = self.monitor.get_service_list('com.victronenergy.grid')
+
+      # minimize delay between time sensitive values
+      for serviceName in serviceNames:
+        power_surplus = -self.monitor.get_value(serviceName, "/Ac/Power", 0)
         logging.info(f'surplus: {power_surplus}')
-        #self.boiler.read_registers()
+      #self.boiler.read_registers()
 
-        #self._dbusservice['/Heater/Power']      = self.boiler.current_power
-        #self._dbusservice['/Heater/Temperature']= self.boiler.current_temperature
-        #self._dbusservice['/ErrorCode']         = 0 # TODO
-        #self._dbusservice['/StatusCode']        = self.boiler.read_status()
-      except Exception as e:
-        logging.info("WARNING: Could not read from Water Heater", exc_info=sys.exc_info()[0])
-        #self._dbusservice['/Heater/Power']          = None
-        #self._dbusservice['/Heater/Temperature']    = None
-        #self._dbusservice['/ErrorCode']         = None
-        #self._dbusservice['/StatusCode']        = None
+      #self._dbusservice['/Heater/Power']      = self.boiler.current_power
+      #self._dbusservice['/Heater/Temperature']= self.boiler.current_temperature
+      #self._dbusservice['/ErrorCode']         = 0 # TODO
+      #self._dbusservice['/StatusCode']        = self.boiler.read_status()
+    except Exception as e:
+      logging.info("WARNING: Could not read from Water Heater", exc_info=sys.exc_info()[0])
+      #self._dbusservice['/Heater/Power']          = None
+      #self._dbusservice['/Heater/Temperature']    = None
+      #self._dbusservice['/ErrorCode']         = None
+      #self._dbusservice['/StatusCode']        = None
 
-      # increment UpdateIndex - to show that new data is available
-      self._dbusservice[path_UpdateIndex] = (self._dbusservice[path_UpdateIndex] + 1) % 255  # increment index
+    # increment UpdateIndex - to show that new data is available
+    self._dbusservice[path_UpdateIndex] = (self._dbusservice[path_UpdateIndex] + 1) % 255  # increment index
     return True
 
   def _handlechangedvalue(self, path, value):
