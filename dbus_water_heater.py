@@ -121,23 +121,15 @@ class DbusWaterHeaterService:
     try:
       self._dbusservice = VeDbusService(servicename)
       self._dbusConn = dbus.SessionBus()  if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus()
-      self.gridmeter = None
-
-      logging.debug("%s /DeviceInstance = %d" % (servicename, deviceinstance))
-      
-      try:
-        instrument = minimalmodbus.Instrument(port, SERVER_ADDRESS)
-      except Exception as e:
-        logging.error(f"Water Heater: {e}")
-        print(e)  # debug
-        raise e
-
+      logging.info("%s /DeviceInstance = %d" % (servicename, deviceinstance))
+     
+      instrument = minimalmodbus.Instrument(port, SERVER_ADDRESS)
       self.boiler = WaterHeater(instrument)
       self.boiler.check_device_type()
 
       # Create the management objects, as specified in the ccgx dbus-api document
       self._dbusservice.add_path('/Mgmt/ProcessName', __file__)
-      self._dbusservice.add_path('/Mgmt/ProcessVersion', 'Unkown version, and running on Python ' + platform.python_version())
+      self._dbusservice.add_path('/Mgmt/ProcessVersion', 'Unknown version, and running on Python ' + platform.python_version())
       self._dbusservice.add_path('/Mgmt/Connection', connection)
 
       # Create the mandatory objects
@@ -156,13 +148,8 @@ class DbusWaterHeaterService:
       self._dbusservice.add_path(path_UpdateIndex, 0, writeable=False)
 
       logging.info('Searching Gridmeter on VEBus')
-
       dummy = {'code': None, 'whenToLog': 'configChange', 'accessLevel': None}
-      self.monitor = DbusMonitor(
-          {
-              'com.victronenergy.grid': {'/Ac/Power': dummy}
-          }
-      )
+      self.monitor = DbusMonitor({'com.victronenergy.grid': {'/Ac/Power': dummy}})
 
       gobject.timeout_add(1000, self._update)
     except UnknownDeviceException:
@@ -179,6 +166,7 @@ class DbusWaterHeaterService:
   def _update(self):
     try:
 
+      # Test interface, to be removed
       logging.info(f'Set power: {self.demosteps[self.current_step]}')
       self.boiler.operate(self.demosteps[self.current_step])
       self.current_step += 1
@@ -189,6 +177,7 @@ class DbusWaterHeaterService:
       for serviceName in serviceNames:
         power_surplus = -self.monitor.get_value(serviceName, "/Ac/Power", 0)
         logging.info(f'surplus: {power_surplus}')
+        self.boiler.operate(power_surplus)
 
       self._dbusservice['/Heater/Power']      = self.boiler.current_power
       self._dbusservice['/Heater/Temperature']= self.boiler.current_temperature
