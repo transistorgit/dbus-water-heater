@@ -56,10 +56,22 @@ class WaterHeater:
 
 
   def check_device_type(self):
-    return
-    #  logging.info(f'type: {str(self.instrument.read_register(self.registers["Device_Type"], 0, 4))}')
-    if self.instrument.read_register(self.registers["Device_Type"], 0, 4) != self.Device_Type:
-            raise UnknownDeviceException
+    maxtries = 3
+    tried = 0
+    for _ in range(maxtries):
+      try:
+        tried += 1
+        found_type = self.instrument.read_register(self.registers["Device_Type"], 0, 4)
+      except Exception as e:
+        if tried >= maxtries:
+          raise e
+        sleep(1)
+        continue
+      
+      if found_type == self.Device_Type:
+        logging.info(f'Found Water Heater (type: {str(self.instrument.read_register(self.registers["Device_Type"], 0, 4))})')
+        return
+    raise UnknownDeviceException
     
 
   def calc_powercmd(self, grid_surplus):
@@ -144,11 +156,14 @@ class DbusWaterHeaterService:
 
       gobject.timeout_add(1000, self._update)
     except UnknownDeviceException:
-      logging.warning('No Water Heater detected, exiting')
+      logging.critical('Unknown device type detected, exiting')
       sys.exit(1)
+    except minimalmodbus.NoResponseError:
+      logging.critical('No Water Heater detected, exiting')
+      sys.exit(2)
     except Exception as e:
       logging.critical("Fatal error at %s", 'DbusWaterHeaterService.__init', exc_info=e)
-      sys.exit(2)
+      sys.exit(3)
 
 
   def _update(self):
