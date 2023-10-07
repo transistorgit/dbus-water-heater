@@ -15,16 +15,16 @@ from datetime import datetime as dt
 from threading import Thread
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python",),)
-from vedbus import VeDbusService, VeDbusItemImport
+from vedbus import VeDbusService
 from dbusmonitor import DbusMonitor
 
 class UnknownDeviceException(Exception):
   '''class to indicate that no device was found'''
 
-Version = 1.0
-Server_Address = 33  # Modbus ID of the Water Heater Device
+VERSION = 1.0
+SERVER_ADDRESS = 33  # Modbus ID of the Water Heater Device
 GRIDMETER_KEY_WORD = 'com.victronenergy.grid'
-SEARCH_TRIALS = 3
+MINIMUM_SWITCH_TIME = 0  # DEBUG reset to 60! shortest allowed time between switching actions
 
 path_UpdateIndex = '/UpdateIndex'
 
@@ -46,13 +46,14 @@ class WaterHeater:
 
     self.powersteps =    [(-1000000, 499), (500, 999), (1000, 1499), (1500, 1999), (2000, 2499), (2500, 2999), (3000, 3499), (3500, 1000000)]
     self.powercommands = [[0, 0, 0],       [1, 0, 0],  [0, 1, 0],    [1, 1, 0],    [0, 0, 1],    [1, 0, 1],    [0, 1, 1],    [1, 1, 1]]
-    self.minimum_time = 60  # minimum time between switch actions in s
     self.lasttime_switched = dt.now()
     self.target_temperature = 50  #°C
     self.current_temperature = None
     self.current_power = None
     self.heartbeat = 0
     self.Device_Type = 0x3286
+    self.exception_counter = 0
+    self.Max_Retries = 3
 
 
   def check_device_type(self):
@@ -84,39 +85,48 @@ class WaterHeater:
   def operate(self, grid_surplus):
     # needs to be called regularly (e.g. 1/s) to update the heartbeat
 
-    # switch to apropriate power level, if last switching incident is longer than the allowed minimum time ago
-    if (dt.now() - self.lasttime_switched).total_seconds() >= self.minimum_time:
-      cmd_bits = self.calc_powercmd(grid_surplus)  # calculate power setting depending on energy surplus
+    try:
+      # switch to apropriate power level, if last switching incident is longer than the allowed minimum time ago
+      if (dt.now() - self.lasttime_switched).total_seconds() >= MINIMUM_SWITCH_TIME:
+        cmd_bits = self.calc_powercmd(grid_surplus)  # calculate power setting depending on energy surplus
 
+        # but stop heating if target temperature is reached
+        self.current_temperature = self.instrument.read_register(self.registers["Temperature"], 2, 4)
+        if self.current_temperature >= self.target_temperature:
+          cmd_bits = [0, 0, 0]
 
-      # but stop heating if target temperature is reached
-      self.current_temperature = self.instrument.read_register(self.registers["Temperature"], 2, 4)
-      if self.current_temperature >= self.target_temperature:
-        cmd_bits = [0, 0, 0]
+        self.instrument.write_bits(self.registers["Power_500W"], cmd_bits)
+        self.lasttime_switched = dt.now()
+          
+      self.current_power = self.instrument.read_register(self.registers["Power_Return"], 0, 4)
 
-      self.instrument.write_bits(self.registers["Power_500W"], cmd_bits)
-      self.lasttime_switched = dt.now()
-        
-    self.current_power = self.instrument.read_register(self.registers["Power_Return"], 0, 4)
+      self.instrument.write_register(self.registers["Heartbeat"], self.heartbeat)
+      self.heartbeat += 1
+      if self.heartbeat >= 100:
+          self.heartbeat = 0
 
-    self.instrument.write_register(self.registers["Heartbeat"], self.heartbeat)
-    self.heartbeat += 1
-    if self.heartbeat >= 100:
-        self.heartbeat = 0
+      self.exception_counter = 0  # reset counter after successful access
 
+    except Exception as e:
+      if self.exception_counter >= self.Max_Retries:
+        self.exception_counter = 0
+        raise e
+      self.exception_counter += 1
+    
 
 class DbusWaterHeaterService:
   def __init__(self, port, servicename, deviceinstance=88, productname='DIY Solar Water Heater (Modbus RTU)', connection='unknown'):
+    self.demosteps = [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 10000]
+    self.current_step = 0
     try:
       self._dbusservice = VeDbusService(servicename)
       self._dbusConn = dbus.SessionBus()  if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else dbus.SystemBus()
       self.gridmeter = None
-      self.search_trials = 0
 
       logging.debug("%s /DeviceInstance = %d" % (servicename, deviceinstance))
       
       try:
-        instrument = minimalmodbus.Instrument(port, Server_Address)
+        instrument = minimalmodbus.Instrument(port, SERVER_ADDRESS)
       except Exception as e:
         logging.error(f"Water Heater: {e}")
         print(e)  # debug
@@ -134,7 +144,7 @@ class DbusWaterHeaterService:
       self._dbusservice.add_path('/DeviceInstance', deviceinstance)
       self._dbusservice.add_path('/ProductId', self.boiler.Device_Type) 
       self._dbusservice.add_path('/ProductName', productname)
-      self._dbusservice.add_path('/FirmwareVersion', Version)
+      self._dbusservice.add_path('/FirmwareVersion', VERSION)
       self._dbusservice.add_path('/HardwareVersion', 0)
       self._dbusservice.add_path('/Connected', 1)
 
@@ -168,6 +178,12 @@ class DbusWaterHeaterService:
 
   def _update(self):
     try:
+
+      logging.info(f'Set power: {self.demosteps[self.current_step]}')
+      self.boiler.operate(self.demosteps[self.current_step])
+      self.current_step += 1
+      self.current_step %= len(self.demosteps)
+
       serviceNames = self.monitor.get_service_list('com.victronenergy.grid')
 
       for serviceName in serviceNames:
@@ -178,12 +194,21 @@ class DbusWaterHeaterService:
       self._dbusservice['/Heater/Temperature']= self.boiler.current_temperature
       self._dbusservice['/ErrorCode']         = 0 # TODO
       self._dbusservice['/StatusCode']        = 0 # TODO self.boiler.read_status()
+    except minimalmodbus.NoResponseError:
+      logging.critical('Connection to Water Heater lost, exiting')
+      try:
+        self._dbusservice['/Heater/Power']      = None
+        self._dbusservice['/Heater/Temperature']= None
+        self._dbusservice['/ErrorCode']         = 2
+        self._dbusservice['/StatusCode']        = None
+      except Exception:
+        pass
     except Exception as e:
       logging.critical("Error in Water Heater", exc_info=sys.exc_info()[0])
       try:
         self._dbusservice['/Heater/Power']      = None
         self._dbusservice['/Heater/Temperature']= None
-        self._dbusservice['/ErrorCode']         = None
+        self._dbusservice['/ErrorCode']         = 3
         self._dbusservice['/StatusCode']        = None
       except Exception:
         pass
@@ -209,7 +234,7 @@ def main():
                       ])
 
   try:
-    logging.info("Start Water Heater modbus service v" + str(Version))
+    logging.info("Start Water Heater modbus service v" + str(VERSION))
 
     if len(sys.argv) > 1:
         port = sys.argv[1]
