@@ -52,7 +52,7 @@ class WaterHeater:
     self.current_temperature = None
     self.current_power = None
     self.heartbeat = 0
-    self.Device_Type = 0x3286
+    self.Device_Type = 0xE5E1
     self.exception_counter = 0
     self.Max_Retries = 3
 
@@ -107,16 +107,14 @@ class WaterHeater:
       self.current_power = self.instrument.read_register(self.registers["Power_Return"], 0, 4)
       
       logging.info(self.instrument.read_register(self.registers["Heartbeat_Return"], 0, 4))
-      logging.info(self.instrument.read_register(5, 0, 4))
-      logging.info(self.instrument.read_register(6, 0, 4))
-
       self.exception_counter = 0  # reset counter after successful access
 
     except Exception as e:
-      logging.info(str(e))
+      logging.info(e)
       if self.exception_counter >= self.Max_Retries:
         self.exception_counter = 0
-        raise e # maybe sys.exit(6) needed if it hangs
+        logging.critical("Water Heater critical error, exiting")
+        sys.exit(6)
       self.exception_counter += 1
     
 
