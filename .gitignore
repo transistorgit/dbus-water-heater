@@ -1,3 +1,5 @@
 .vscode/
 *.log
 __pycache__/
+__pycache__/dbus_water_heater.cpython-38.pyc
+__pycache__/test.cpython-38.pyc
