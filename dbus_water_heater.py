@@ -23,6 +23,7 @@ class UnknownDeviceException(Exception):
 
 VERSION = 1.0
 SERVER_ADDRESS = 33  # Modbus ID of the Water Heater Device
+BAUDRATE = 9600
 GRIDMETER_KEY_WORD = 'com.victronenergy.grid'
 MINIMUM_SWITCH_TIME = 0  # DEBUG reset to 60! shortest allowed time between switching actions
 
@@ -86,6 +87,11 @@ class WaterHeater:
     # needs to be called regularly (e.g. 1/s) to update the heartbeat
 
     try:
+      self.instrument.write_register(self.registers["Heartbeat"], self.heartbeat, 0, 16)
+      self.heartbeat += 1
+      if self.heartbeat >= 100:  # must be below 1000 for the server to work 
+          self.heartbeat = 0
+
       # switch to apropriate power level, if last switching incident is longer than the allowed minimum time ago
       if (dt.now() - self.lasttime_switched).total_seconds() >= MINIMUM_SWITCH_TIME:
         cmd_bits = self.calc_powercmd(grid_surplus)  # calculate power setting depending on energy surplus
@@ -99,24 +105,23 @@ class WaterHeater:
         self.lasttime_switched = dt.now()
           
       self.current_power = self.instrument.read_register(self.registers["Power_Return"], 0, 4)
-
-      self.instrument.write_register(self.registers["Heartbeat"], self.heartbeat)
-      self.heartbeat += 1
-      if self.heartbeat >= 100:
-          self.heartbeat = 0
+      
+      logging.info(self.instrument.read_register(self.registers["Heartbeat_Return"], 0, 4))
+      logging.info(self.instrument.read_register(5, 0, 4))
+      logging.info(self.instrument.read_register(6, 0, 4))
 
       self.exception_counter = 0  # reset counter after successful access
 
     except Exception as e:
+      logging.info(str(e))
       if self.exception_counter >= self.Max_Retries:
         self.exception_counter = 0
-        raise e
+        raise e # maybe sys.exit(6) needed if it hangs
       self.exception_counter += 1
     
 
 class DbusWaterHeaterService:
   def __init__(self, port, servicename, deviceinstance=88, productname='DIY Solar Water Heater (Modbus RTU)', connection='unknown'):
-    self.demosteps = [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 10000]
     self.current_step = 0
     try:
       self._dbusservice = VeDbusService(servicename)
@@ -124,6 +129,7 @@ class DbusWaterHeaterService:
       logging.info("%s /DeviceInstance = %d" % (servicename, deviceinstance))
      
       instrument = minimalmodbus.Instrument(port, SERVER_ADDRESS)
+      instrument.serial.baudrate = BAUDRATE
       self.boiler = WaterHeater(instrument)
       self.boiler.check_device_type()
 
@@ -165,17 +171,11 @@ class DbusWaterHeaterService:
 
   def _update(self):
     try:
-
-      # Test interface, to be removed
-      logging.info(f'Set power: {self.demosteps[self.current_step]}')
-      self.boiler.operate(self.demosteps[self.current_step])
-      self.current_step += 1
-      self.current_step %= len(self.demosteps)
-
       serviceNames = self.monitor.get_service_list('com.victronenergy.grid')
 
       for serviceName in serviceNames:
-        power_surplus = -self.monitor.get_value(serviceName, "/Ac/Power", 0)
+        #power_surplus = -self.monitor.get_value(serviceName, "/Ac/Power", 0)
+        power_surplus = 600
         logging.info(f'surplus: {power_surplus}')
         self.boiler.operate(power_surplus)
 
@@ -223,12 +223,12 @@ def main():
                       ])
 
   try:
-    logging.info("Start Water Heater modbus service v" + str(VERSION))
 
     if len(sys.argv) > 1:
         port = sys.argv[1]
+        logging.info(f"Start Water Heater modbus service v{str(VERSION)} on port {port}")
     else:
-        logging.error("Error: no port given")
+        logging.info(f"Failed to start Water Heater modbus service v{str(VERSION)}: no port given")
         sys.exit(4)
 
     from dbus.mainloop.glib import DBusGMainLoop
