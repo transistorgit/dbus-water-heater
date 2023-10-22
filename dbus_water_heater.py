@@ -17,6 +17,7 @@ from threading import Thread
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "/opt/victronenergy/dbus-systemcalc-py/ext/velib_python",),)
 from vedbus import VeDbusService
 from dbusmonitor import DbusMonitor
+from settingsdevice import SettingsDevice  # available in the velib_python repository
 
 class UnknownDeviceException(Exception):
   '''class to indicate that no device was found'''
@@ -52,6 +53,7 @@ class WaterHeater:
     self.target_temperature = 50  #°C
     self.current_temperature = None
     self.current_power = None
+    self.status = None  # 0 Auto, 1 FORCE ON
     self.heartbeat = 0
     self.Device_Type = 0xE5E1
     self.exception_counter = 0
@@ -114,7 +116,7 @@ class WaterHeater:
       if self.exception_counter >= self.Max_Retries:
         self.exception_counter = 0
         logging.critical("Water Heater critical error, exiting")
-        sys.exit(6)
+        os.exit(6)
       self.exception_counter += 1
     
 
@@ -146,6 +148,7 @@ class DbusWaterHeaterService:
 
       self._dbusservice.add_path('/Heater/Power', None, writeable=False, gettextcallback=lambda a, x: "{:.0f}W".format(x))
       self._dbusservice.add_path('/Heater/Temperature', None, writeable=False, gettextcallback=lambda a, x: "{:.1f}°C".format(x))
+      self._dbusservice.add_path('/Heater/SurplusPower', None, writeable=False, gettextcallback=lambda a, x: "{:.0f}W".format(x))
       self._dbusservice.add_path('/Heater/TargetTemperature', None, writeable=True, gettextcallback=lambda a, x: "{:.0f}°C".format(x), onchangecallback=self._handlechangedvalue)
       self._dbusservice.add_path('/ErrorCode', 0, writeable=False)
       self._dbusservice.add_path('/StatusCode', 0, writeable=False)
@@ -155,16 +158,22 @@ class DbusWaterHeaterService:
       dummy = {'code': None, 'whenToLog': 'configChange', 'accessLevel': None}
       self.monitor = DbusMonitor({'com.victronenergy.grid': {'/Ac/Power': dummy}})
 
+      self.settings = SettingsDevice(
+      bus=dbus.SystemBus() if (platform.machine() == 'armv7l') else dbus.SessionBus(),
+      supportedSettings={'targettemperature': ['/Settings/Boiler/TargetTemperature', 50, 0, 80]},
+      eventCallback=self._handlechangedvalue)
+      self.boiler.target_temperature = self.settings['targettemperature'] if not None else 50
+
       gobject.timeout_add(1000, self._update)
     except UnknownDeviceException:
       logging.critical('Unknown device type detected, exiting')
-      sys.exit(1)
+      os.exit(1)
     except minimalmodbus.NoResponseError:
       logging.critical('No Water Heater detected, exiting')
-      sys.exit(2)
+      os.exit(2)
     except Exception as e:
       logging.critical("Fatal error at %s", 'DbusWaterHeaterService.__init', exc_info=e)
-      sys.exit(3)
+      os.exit(3)
 
 
   def _update(self):
@@ -172,13 +181,14 @@ class DbusWaterHeaterService:
       serviceNames = self.monitor.get_service_list('com.victronenergy.grid')
 
       for serviceName in serviceNames:
-        #power_surplus = -self.monitor.get_value(serviceName, "/Ac/Power", 0)
-        power_surplus = 600
-        logging.info(f'surplus: {power_surplus}')
-        self.boiler.operate(power_surplus)
+        surplus = -self.monitor.get_value(serviceName, "/Ac/Power", 0)
+        self._dbusservice['/Heater/SurplusPower']= surplus
+        logging.info(f'surplus: {surplus}')
+        self.boiler.operate(surplus)
 
       self._dbusservice['/Heater/Power']      = self.boiler.current_power
       self._dbusservice['/Heater/Temperature']= self.boiler.current_temperature
+      self._dbusservice['/Heater/TargetTemperature']= self.boiler.target_temperature
       self._dbusservice['/ErrorCode']         = 0
       self._dbusservice['/StatusCode']        = self.boiler.status
     except minimalmodbus.NoResponseError:
@@ -206,7 +216,9 @@ class DbusWaterHeaterService:
     return True
 
   def _handlechangedvalue(self, path, value):
-    logging.debug("someone else updated %s to %s" % (path, value))
+    logging.info("someone else updated %s to %s" % (path, value))
+    if path == '/Heater/TargetTemperature':
+      self.boiler.target_temperature = value if value <= 80 else 80
     return True # accept the change
 
 def main():
@@ -227,7 +239,7 @@ def main():
         logging.info(f"Start Water Heater modbus service v{str(VERSION)} on port {port}")
     else:
         logging.info(f"Failed to start Water Heater modbus service v{str(VERSION)}: no port given")
-        sys.exit(4)
+        os.exit(4)
 
     from dbus.mainloop.glib import DBusGMainLoop
     # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
@@ -247,7 +259,7 @@ def main():
 
   except Exception as e:
     logging.critical('Error at %s', 'main', exc_info=e)
-    sys.exit(3)
+    os.exit(3)
 
 if __name__ == "__main__":
   main()
