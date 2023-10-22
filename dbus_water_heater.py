@@ -42,6 +42,7 @@ class WaterHeater:
       "Heartbeat_Return" : 1,
       "Power_Return": 2,
       "Device_Type": 3,
+      "Operation_Mode": 4,  # AUTO/FORCE ON
       "Heartbeat": 0
     }
 
@@ -105,8 +106,7 @@ class WaterHeater:
         self.lasttime_switched = dt.now()
           
       self.current_power = self.instrument.read_register(self.registers["Power_Return"], 0, 4)
-      
-      logging.info(self.instrument.read_register(self.registers["Heartbeat_Return"], 0, 4))
+      self.status = self.instrument.read_register(self.registers["Operation_Mode"], 0, 4)     
       self.exception_counter = 0  # reset counter after successful access
 
     except Exception as e:
@@ -179,8 +179,8 @@ class DbusWaterHeaterService:
 
       self._dbusservice['/Heater/Power']      = self.boiler.current_power
       self._dbusservice['/Heater/Temperature']= self.boiler.current_temperature
-      self._dbusservice['/ErrorCode']         = 0 # TODO
-      self._dbusservice['/StatusCode']        = 0 # TODO self.boiler.read_status()
+      self._dbusservice['/ErrorCode']         = 0
+      self._dbusservice['/StatusCode']        = self.boiler.status
     except minimalmodbus.NoResponseError:
       logging.critical('Connection to Water Heater lost, exiting')
       try:
